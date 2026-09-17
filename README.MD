@@ -2,8 +2,6 @@
 
 Manuale bilingue / Bilingual manual: **Italiano + English** (stesso file / same file).
 
-- Sorgente di verità del programma: [`prompt_acc2oth.md`](./prompt_acc2oth.md)
-- Contesto migrazione: [`ricerche.md`](./ricerche.md)
 - Programma: [`acc2oth.py`](./acc2oth.py) · launcher [`acc2oth.cmd`](./acc2oth.cmd)
 
 ---
