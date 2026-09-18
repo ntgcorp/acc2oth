@@ -9,10 +9,10 @@ Uso:
     file.ini ......... Path al file INI [CONFIG] (required).
     openrouter.key ... Chiave OpenRouter (facoltativa): se passata, si sovrappone
                        a OPENROUTER.KEY del .ini nel dictConfig finale.
-                       Serve quando EXP.PROMPT=True o EXP.PYTHON=True e il .ini
-                       non contiene la chiave (OPENROUTER.KEY facoltativa nel .ini).
+                       Serve quando EXP.PROMPT=True o EXP.PYTHON=True o EXP.JAVA=True
+                       e il .ini non contiene la chiave (OPENROUTER.KEY facoltativa nel .ini).
 
-Workflow: app_args -> app_verify -> app_export -> app_prompt -> app_python -> app_end.
+Workflow: app_args -> app_verify -> app_export -> app_tables -> app_prompt -> app_python -> app_java -> app_end.
 Ogni app_* ritorna sResult ("" = ok, altrimenti messaggio di errore).
 Exit code: 0 ok, 1 errore estrazione, 2 errore validazione/config.
 """
@@ -42,7 +42,7 @@ AC_DATA_ACCESS_PAGE = 6
 VBEXT_CT_STDMODULE = 1
 VBEXT_CT_CLASSMODULE = 2
 
-EXPORT_ORDER = ("FORMS", "MODULES", "CLASSES", "QUERYES", "MACROS", "REPORTS")
+EXPORT_ORDER = ("FORMS", "MODULES", "CLASSES", "QUERYES", "MACROS", "REPORTS", "TABLES")
 SUBDIR = {
     "FORMS": "forms",
     "MODULES": "modules",
@@ -50,6 +50,7 @@ SUBDIR = {
     "QUERYES": "queryes",
     "MACROS": "macros",
     "REPORTS": "reports",
+    "TABLES": "tables",
 }
 EXT = {
     "FORMS": ".txt",
@@ -58,6 +59,7 @@ EXT = {
     "QUERYES": ".sql",
     "MACROS": ".txt",
     "REPORTS": ".txt",
+    "TABLES": ".csv",
 }
 
 TRUE_SET = {"true", "1", "yes", "si", "sì", "y", "on"}
@@ -164,6 +166,8 @@ def app_args(file_ini: str | Path, cli_key: str = "") -> tuple[dict, str]:
         "OPENROUTER.MODEL": norm.get("OPENROUTER.MODEL", ""),
         "EXP.PROMPT.LIST": parse_csv_upper(norm.get("EXP.PROMPT.LIST", "")),
         "EXP.PYTHON.LIST": parse_csv_upper(norm.get("EXP.PYTHON.LIST", "")),
+        "EXP.JAVA.LIST": parse_csv_upper(norm.get("EXP.JAVA.LIST", "")),
+        "EXP.TABLES.LIST": parse_csv_upper(norm.get("EXP.TABLES.LIST", "")),
     }
     # Flag EXP.* (default False); QUERIES e canonico, QUERYES alias storico deprecato.
     for cat in EXPORT_ORDER:
@@ -188,15 +192,21 @@ def app_args(file_ini: str | Path, cli_key: str = "") -> tuple[dict, str]:
             config["EXP.QUERIES"] = val  # alias canonico sullo stesso valore
     if "_QUERIES_ALIAS_WARNING" not in config and "EXP.QUERIES" in norm and "EXP.QUERYES" in norm:
         config["_QUERIES_ALIAS_WARNING"] = "both"
-    for extra in ("EXP.PROMPT", "EXP.PYTHON"):
+    for extra in ("EXP.PROMPT", "EXP.PYTHON", "EXP.JAVA", "EXP.TABLES"):
         try:
             config[extra] = parse_bool(norm.get(extra, "False"))
         except ValueError:
             return {}, f"Flag {extra} non booleano: {norm.get(extra)!r}"
 
+    # Validazione LIST: se LIST presente ma flag False -> errore
+    for flag, list_key in (("EXP.TABLES", "EXP.TABLES.LIST"), ("EXP.JAVA", "EXP.JAVA.LIST"),
+                           ("EXP.PROMPT", "EXP.PROMPT.LIST"), ("EXP.PYTHON", "EXP.PYTHON.LIST")):
+        if config.get(list_key) and not config.get(flag):
+            return {}, f"{list_key} specificata ma {flag}=False (deve essere True)"
+
     # Override OPENROUTER.KEY da 2o parametro CLI (se passato e non vuoto).
     # OPENROUTER.KEY e facoltativa nel .ini: il dictConfig finale deve
-    # contenerla (non vuota) solo se EXP.PROMPT=True o EXP.PYTHON=True.
+    # contenerla (non vuota) solo se EXP.PROMPT=True o EXP.PYTHON=True o EXP.JAVA=True.
     cli_key = (cli_key or "").strip()
     if cli_key:
         config["OPENROUTER.KEY"] = cli_key
@@ -254,14 +264,14 @@ def app_verify(config: dict) -> str:
         return f"Directory di LOG non creabile: {log_path.parent} ({e})"
     config["_LOG"] = str(log_path.resolve())
 
-    if config.get("EXP.PROMPT") or config.get("EXP.PYTHON"):
+    if config.get("EXP.PROMPT") or config.get("EXP.PYTHON") or config.get("EXP.JAVA"):
         if not (config.get("OPENROUTER.KEY") or "").strip():
             return ("OPENROUTER.KEY richiesta nel dictConfig finale quando "
-                    "EXP.PROMPT=True o EXP.PYTHON=True: impostarla nel .ini "
+                    "EXP.PROMPT=True o EXP.PYTHON=True o EXP.JAVA=True: impostarla nel .ini "
                     "oppure passarla come 2o parametro CLI "
                     "(python -m acc2oth <file.ini> <openrouter.key>)")
         if not config.get("OPENROUTER.MODEL"):
-            return "OPENROUTER.MODEL richiesto quando EXP.PROMPT=True o EXP.PYTHON=True"
+            return "OPENROUTER.MODEL richiesto quando EXP.PROMPT=True o EXP.PYTHON=True o EXP.JAVA=True"
     return ""
 
 
@@ -427,6 +437,188 @@ def app_export(config: dict, logger: logging.Logger, state: dict) -> str:
         logger.warning("Alias: EXP.QUERIES prevale su EXP.QUERYES deprecato (usare QUERIES)")
     elif config.get("_QUERIES_ALIAS_WARNING") == "legacy":
         logger.warning("Alias deprecato EXP.QUERYES in uso: usare EXP.QUERIES")
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# app_tables — esporta tabelle in CSV
+# ---------------------------------------------------------------------------
+
+def app_tables(config: dict, logger: logging.Logger, state: dict) -> str:
+    """Esporta tabelle Access in file CSV. Errori su singola tabella non abortiscono."""
+    if not config.get("EXP.TABLES"):
+        return ""
+    try:
+        import win32com.client  # type: ignore
+    except ImportError:
+        return "Microsoft Access COM automation non disponibile: installare Access/pywin32 (win32com.client)"
+
+    out = Path(config["_OUT"])
+    accdb = config["_ACCDB"]
+    errors: list[dict] = state["errors"]
+    wanted: set[str] = set(config.get("EXP.TABLES.LIST", []))
+
+    try:
+        app = win32com.client.Dispatch("Access.Application")
+    except Exception as e:
+        return f"Impossibile avviare Access.Application (Access installato?): {e}"
+
+    def record_tables(name: str, file_object: str) -> None:
+        entry = {"name": name, "file_object": file_object,
+                 "file_prompt": None, "file_python": None, "file_java": None}
+        state["files"]["tables"].append(entry)
+        state["counts"]["tables"] += 1
+
+    try:
+        try:
+            app.AutomationSecurity = 1
+        except Exception as e:
+            logger.warning("AutomationSecurity=1 non impostabile: %s", e)
+        logger.info("Fase apertura database: %s (sola lettura, Exclusive=False)...", accdb)
+        try:
+            app.OpenCurrentDatabase(os_path(accdb), Exclusive=False)
+        except Exception as e:
+            logger.error("Fase apertura database FALLITA: %s", _err_text(e))
+            msg = str(e)
+            if "already in use" in msg or "Could not use" in msg or "bloccato" in msg.lower():
+                return f"Database bloccato/in uso (chiudere Access e riprovare): {_err_text(e)}"
+            return f"Impossibile aprire IN.ACCDB {accdb}: {_err_text(e)}"
+        logger.info("Fase apertura database OK: %s", accdb)
+
+        try:
+            # Iterazione corretta della collezione TableDefs (COM è 1-based)
+            db = app.CurrentDb()
+            tdefs = []
+            for i in range(1, db.TableDefs.Count + 1):
+                try:
+                    tdefs.append(db.TableDefs(i))
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.error("Lettura TableDefs fallita: %s", _err_text(e))
+            errors.append({"object_type": "Table", "object_name": "", "error": _err_text(e)})
+            return ""
+
+        names: list[str] = []
+        user_tables: list[str] = []
+        for t in tdefs:
+            try:
+                tname = str(t.Name)
+            except Exception:
+                continue
+            if not tname.startswith("MSys"):
+                user_tables.append(tname)
+            if tname.startswith("MSys"):
+                continue  # salta tabelle di sistema
+            if wanted and tname.upper() not in wanted:
+                continue
+            names.append(tname)
+
+        logger.info("Exporting TABLES (%d)", len(names))
+        if wanted:
+            logger.info("Filtro EXP.TABLES.LIST: %s. Tabelle utente nel DB: %s",
+                        ", ".join(sorted(wanted)), ", ".join(user_tables))
+        if wanted and not names:
+            logger.warning("EXP.TABLES.LIST specificata (%s) ma nessuna tabella corrisponde. Tabelle disponibili: %s",
+                           ", ".join(sorted(wanted)), ", ".join(user_tables) if user_tables else "(nessuna)")
+
+        subdir = out / SUBDIR["TABLES"]
+        ensure_dir(subdir)
+        used_tables: set[str] = set()
+
+        for tname in names:
+            safe = sanitize_filename(tname)
+            dest = _unique_path(subdir, safe, EXT["TABLES"], used_tables)
+            try:
+                rs = app.CurrentDb().OpenRecordset(f"SELECT * FROM [{tname}]")
+                # Scrive CSV con intestazione
+                fields = [f.Name for f in rs.Fields]
+                lines = [",".join(fields)]
+                while not rs.EOF:
+                    row = []
+                    for f in rs.Fields:
+                        val = f.Value
+                        if val is None:
+                            row.append("")
+                        else:
+                            s = str(val).replace('"', '""')
+                            if "," in s or '"' in s or "\n" in s:
+                                s = f'"{s}"'
+                            row.append(s)
+                    lines.append(",".join(row))
+                    rs.MoveNext()
+                rs.Close()
+                dest.write_text("\n".join(lines), encoding="utf-8")
+                rel = dest.relative_to(out).as_posix()
+                logger.info("Exported %s -> %s", tname, rel)
+                record_tables(tname, rel)
+            except Exception as e:
+                logger.error("Export TABLE %r fallito: %s", tname, _err_text(e))
+                errors.append({"object_type": "Table", "object_name": tname,
+                               "error": f"CSV export failed: {_err_text(e)}"})
+    finally:
+        try:
+            try:
+                app.CloseCurrentDatabase()
+            except Exception:
+                pass
+            app.Quit()
+        except Exception as e:
+            logger.warning("Quit Access non riuscito: %s", e)
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# app_java — genera file Java da moduli/classe VBA via OpenRouter
+# ---------------------------------------------------------------------------
+
+JAVA_SYSTEM = (
+    "Sei un transpiler VBA->Java. Traduci il modulo .bas/.cls in Java 17+ idiomatico, "
+    "preservando la logica: classi, metodi, cicli, condizioni, gestione errori. "
+    "Usa record/optional/stream dove appropriato. "
+    "Sostituisci DAO/ADODB con JDBC/Hibernate e MsgBox/InputBox con logging/exceptions. "
+    "Restituisci SOLO codice Java, senza spiegazioni."
+)
+
+
+def app_java(config: dict, logger: logging.Logger, state: dict) -> str:
+    if not config.get("EXP.JAVA"):
+        return ""
+    out = Path(config["_OUT"])
+    api_key = config.get("OPENROUTER.KEY", "")
+    model = config.get("OPENROUTER.MODEL", "")
+    wanted: set[str] = set(config.get("EXP.JAVA.LIST", []))
+    sources = _scan_vba_sources(out, wanted)
+    if not sources:
+        if wanted:
+            logger.warning("EXP.JAVA=True ma nessun .bas/.cls corrisponde a EXP.JAVA.LIST=%s", sorted(wanted))
+        else:
+            logger.warning("EXP.JAVA=True ma nessun sorgente .bas/.cls trovato in modules/classes")
+        return ""
+    logger.info("Generating JAVA (%d) da modules/classes", len(sources))
+    for src in sources:
+        cat_key = "modules" if src.parent.name.lower() == "modules" else "classes"
+        entry = _ensure_entry(state, cat_key, src, out)
+        dest = src.parent / (src.stem + ".java")
+        try:
+            vba_code = src.read_text(encoding="utf-8", errors="ignore")
+            rel_src = src.relative_to(out).as_posix()
+            logger.info("OpenRouter JAVA start: %s (model=%s, src=%s, %d chars) -> %s",
+                        entry["name"], model, rel_src, len(vba_code), dest.relative_to(out).as_posix())
+            t0 = time.monotonic()
+            content, usage = _openrouter_chat(api_key, model, JAVA_SYSTEM,
+                                              f"Ecco il codice VBA (.bas/.cls):\n\n```vba\n{vba_code}\n```")
+            dt = time.monotonic() - t0
+            dest.write_text(content, encoding="utf-8")
+            entry["file_java"] = dest.relative_to(out).as_posix()
+            logger.info("OpenRouter JAVA done: %s in %s | model=%s | tokens prompt=%s completion=%s total=%s | cost=$%.6f | -> %s",
+                        entry["name"], _fmt_elapsed(dt), usage.get("model", model),
+                        usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                        usage.get("total_tokens"), usage.get("cost", 0.0), entry["file_java"])
+        except Exception as e:
+            logger.error("Java %r fallito: %s", entry["name"], e)
+            state["errors"].append({"object_type": "Java", "object_name": entry["name"],
+                                    "error": str(e)})
     return ""
 
 
@@ -723,7 +915,7 @@ def _ensure_entry(state: dict, cat_key: str, src: Path, out: Path) -> dict:
         None,
     )
     if entry is None:
-        entry = {"name": src.stem, "file_object": rel_src, "file_prompt": None, "file_python": None}
+        entry = {"name": src.stem, "file_object": rel_src, "file_prompt": None, "file_python": None, "file_java": None}
         state["files"][cat_key].append(entry)
         state["counts"][cat_key] = state["counts"].get(cat_key, 0) + 1
     else:
@@ -840,7 +1032,7 @@ def app_end(config: dict, state: dict, logger: logging.Logger) -> str:
     dest = out / "index.json"
     # Merge con index.json precedente: se il run corrente non ha esportato
     # (tutti EXP.*=False), state contiene solo le entry toccate da
-    # app_prompt/app_python via _ensure_entry; senza merge si perderebbe
+    # app_prompt/app_python/app_java via _ensure_entry; senza merge si perderebbe
     # lo storico delle esportazioni precedenti.
     merged_files: dict[str, list[dict]] = {k.lower(): [] for k in EXPORT_ORDER}
     try:
@@ -860,7 +1052,7 @@ def app_end(config: dict, state: dict, logger: logging.Logger) -> str:
                 continue
             if key in by_name:
                 cur = by_name[key]
-                for f in ("file_object", "file_prompt", "file_python"):
+                for f in ("file_object", "file_prompt", "file_python", "file_java"):
                     if e.get(f):
                         cur[f] = e[f]
                 if not cur.get("file_object") and e.get("file_object"):
@@ -914,8 +1106,9 @@ esempi:
 
 schema INI minimo = schema di esempio (sezione [CONFIG]):
   tutti i parametri EXP possono essere False (nessuna esportazione/generazione).
-  EXP.PROMPT.LIST / EXP.PYTHON.LIST sono facoltativi: nomi oggetto separati
-  da "," (case-insensitive); se assenti o vuoti = tutti i .bas/.cls trovati.
+  EXP.PROMPT.LIST / EXP.PYTHON.LIST / EXP.JAVA.LIST / EXP.TABLES.LIST sono facoltativi:
+  nomi oggetto separati da "," (case-insensitive); se assenti o vuoti = tutti i .bas/.cls trovati.
+  EXP.TABLES.LIST richiede EXP.TABLES=True; EXP.JAVA.LIST richiede EXP.JAVA=True.
   [CONFIG]
   IN.ACCDB=C:\path\db.accdb
   OUT.PATH=C:\path\out
@@ -926,10 +1119,14 @@ schema INI minimo = schema di esempio (sezione [CONFIG]):
   EXP.QUERIES=False
   EXP.MACROS=False
   EXP.REPORTS=False
+  EXP.TABLES=False
+  EXP.TABLES.LIST=Tabella1, Tabella2
   EXP.PROMPT=False
   EXP.PROMPT.LIST=Modulo1, Classe1
   EXP.PYTHON=False
   EXP.PYTHON.LIST=Modulo1, Classe1
+  EXP.JAVA=False
+  EXP.JAVA.LIST=Modulo1, Classe1
 """
 
 
@@ -937,7 +1134,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="acc2oth",
         description="Access .accdb -> File Singoli (cfr. prompt_acc2oth.md). "
-                    "Estrae Form/Moduli/Classi/Query/Macro/Report in file singoli sotto OUT.PATH.",
+                    "Estrae Form/Moduli/Classi/Query/Macro/Report/Tabelle in file singoli sotto OUT.PATH.",
         epilog=HELP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -985,13 +1182,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     logger = setup_logger(config["_LOG"])
     state = new_state()
     logger.info("acc2oth start: accdb=%s out=%s", config["_ACCDB"], config["_OUT"])
-    if (config.get("EXP.PROMPT") or config.get("EXP.PYTHON")) and config.get("_KEY_SOURCE") == "cli":
+    if (config.get("EXP.PROMPT") or config.get("EXP.PYTHON") or config.get("EXP.JAVA")) and config.get("_KEY_SOURCE") == "cli":
         logger.info("OPENROUTER.KEY da CLI (override del valore .ini; valore non mostrato)")
 
     s = app_export(config, logger, state)
     if s:
         logger.error("app_export: %s", s)
         print(f"ERRORE estrazione: {s}", file=sys.stderr)
+        try:
+            app_end(config, state, logger)
+        except Exception:
+            pass
+        return 1
+    s = app_tables(config, logger, state)
+    if s:
+        logger.error("app_tables: %s", s)
+        print(f"ERRORE export tabelle: {s}", file=sys.stderr)
         try:
             app_end(config, state, logger)
         except Exception:
@@ -1004,6 +1210,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     s = app_python(config, logger, state)
     if s:
         logger.error("app_python: %s", s)
+        return 1
+    s = app_java(config, logger, state)
+    if s:
+        logger.error("app_java: %s", s)
         return 1
     s = app_end(config, state, logger)
     if s:

@@ -17,7 +17,7 @@ pronti per versionamento (git) e transpiling VBA -> Python tramite OpenRouter.
 Workflow interno (ogni `app_*` ritorna `sResult`: `""` = ok):
 
 ```
-app_args(file_ini, cli_key) -> app_verify -> app_export -> app_prompt -> app_python -> app_end
+app_args(file_ini, cli_key) -> app_verify -> app_export -> app_tables -> app_prompt -> app_python -> app_java -> app_end
 ```
 
 - `app_args`: carica il file `.ini` alla partenza nel dizionario **`dictConfig`**
@@ -26,13 +26,14 @@ app_args(file_ini, cli_key) -> app_verify -> app_export -> app_prompt -> app_pyt
   nel `dictConfig` finale quando servono.
 - `app_export`: esporta via COM (`SaveAsText`, `QueryDefs.SQL`, `VBE.Export`)
   nell'ordine `FORMS > MODULES > CLASSES > QUERIES > MACROS > REPORTS`.
-- `app_prompt` / `app_python`: leggono i `.bas`/`.cls` **già presenti su filesystem**
-  in `OUT.PATH/modules/` e `OUT.PATH/classes/` e generano `prompt_*.md` / `*.py` via OpenRouter.
+- `app_tables`: esporta le tabelle in CSV (se `EXP.TABLES=True`).
+- `app_prompt` / `app_python` / `app_java`: leggono i `.bas`/`.cls` **già presenti su filesystem**
+  in `OUT.PATH/modules/` e `OUT.PATH/classes/` e generano `prompt_*.md` / `*.py` / `*.java` via OpenRouter.
 - `app_end`: scrive `index.json` (con merge dello storico).
 
 **Cosa estrae (solo se `EXP.*=True`):** Form (`.txt`), Moduli standard (`.bas`),
-Classi (`.cls`), Query (`.sql`), Macro (`.txt`), Report (`.txt`).
-**Tabelle: mai esportate**, solo log `Skipped table <nome> (type: linked/local)`.
+Classi (`.cls`), Query (`.sql`), Macro (`.txt`), Report (`.txt`), Tabelle (`.csv`).
+**Tabelle: mai esportate di default**, solo log `Skipped table <nome> (type: linked/local)` se `EXP.TABLES=False`.
 
 ## 2. Requisiti
 
@@ -41,8 +42,32 @@ Classi (`.cls`), Query (`.sql`), Macro (`.txt`), Report (`.txt`).
   ```powershell
   pip install pywin32 requests
   ```
-- Chiave OpenRouter (solo se `EXP.PROMPT=True` o `EXP.PYTHON=True`), es.
-  `OPENROUTER.MODEL=qwen/qwen-2.5-coder-32b-instruct`.
+- Chiave OpenRouter **personale** (solo se `EXP.PROMPT=True` o `EXP.PYTHON=True` o `EXP.JAVA=True`):
+  richiedila su `https://openrouter.ai/keys` e usala come `OPENROUTER.KEY` nel
+  `.ini` oppure come 2o parametro CLI (mai committare chiavi reali).
+  Modello di esempio: `OPENROUTER.MODEL=qwen/qwen-2.5-coder-32b-instruct`.
+
+## 2b. Configurazione del launcher `acc2oth.cmd`
+
+Prima del primo uso, apri `acc2oth.cmd` con un editor di testo e imposta la
+variabile `PYN` con il percorso del **proprio launcher Python** (nel file
+è preimpostato un esempio `k:\Tools\pyn.cmd` che quasi certamente non
+corrisponde al tuo PC):
+
+```bat
+REM IMPOSTARE LAUNCHER PYTHON (percorso del proprio python/launcher)
+SET "PYN=C:\percorso\del\tuo\python.cmd"
+```
+
+Poi verifica dal prompt:
+
+```bat
+acc2oth.cmd test_codfiscale.ini sk-or-v1-TUA_CHIAVE_PERSONALE
+```
+
+Il 2o parametro è la **tua chiave OpenRouter personale**: si sovrappone a
+`OPENROUTER.KEY` del `.ini` e ti evita di salvare il segreto nel file di
+configurazione. Senza `EXP.PROMPT`/`EXP.PYTHON` attivi la chiave non serve.
 
 ## 3. File di configurazione .INI e `dictConfig`
 
@@ -55,11 +80,13 @@ in un dizionario `dictConfig`**. Chiavi normalizzate a upper + trim; valori path
 | `IN.ACCDB` | sì | — | Path al `.accdb`/`.mdb` (relativo alla cartella del `.ini` o assoluto). Deve esistere. |
 | `OUT.PATH` | sì | — | Cartella output; **creata se non esiste** (ricorsiva). Verificata in scrittura. |
 | `LOG` | no | `export.log` | Path **relativo a `OUT.PATH`** (in append). Se assoluto, usato così com'è. |
-| `EXP.FORMS/MODULES/CLASSES/QUERIES/MACROS/REPORTS` | no | `False` | `True/False` (tollerati `1/0/yes/no/si/on/off`, case-insensitive). Parametro canonico `EXP.QUERIES`; alias storico deprecato `EXP.QUERYES` tollerato (`QUERIES` prevale + warning). Cartella output sempre `queryes/`. |
+| `EXP.FORMS/MODULES/CLASSES/QUERIES/MACROS/REPORTS/TABLES` | no | `False` | `True/False` (tollerati `1/0/yes/no/si/on/off`, case-insensitive). Parametro canonico `EXP.QUERIES`; alias storico deprecato `EXP.QUERYES` tollerato (`QUERIES` prevale + warning). Cartella output sempre `queryes/`. `EXP.TABLES` esporta tabelle in `tables/*.csv`. |
 | `EXP.PROMPT` / `EXP.PROMPT.LIST` | no | `False` / vuoto | Genera `prompt_<nome>.md` per ogni `.bas`/`.cls`. `LIST` = CSV case-insensitive sugli stem; vuota = tutti. |
 | `EXP.PYTHON` / `EXP.PYTHON.LIST` | no | `False` / vuoto | Genera `<nome>.py` per ogni `.bas`/`.cls`. Filtro come sopra. |
-| `OPENROUTER.KEY` | **facoltativa nel `.ini`** | `""` | **Deve essere presente (non vuota) nel `dictConfig` finale se `EXP.PROMPT=True` o `EXP.PYTHON=True`**: vale il valore `.ini` **oppure** il 2o parametro CLI (che si sovrappone). Se entrambi `False`, può mancare. |
-| `OPENROUTER.MODEL` | richiesta solo se `EXP.PROMPT/EXP.PYTHON=True` | `""` | Es. `qwen/qwen-2.5-coder-32b-instruct`. Vedi nota privacy sotto. |
+| `EXP.JAVA` / `EXP.JAVA.LIST` | no | `False` / vuoto | Genera `<nome>.java` per ogni `.bas`/`.cls` (via OpenRouter). `LIST` = CSV case-insensitive sugli stem; richiede `EXP.JAVA=True`. |
+| `EXP.TABLES` / `EXP.TABLES.LIST` | no | `False` / vuoto | Esporta tabelle in `tables/*.csv`. `LIST` = CSV case-insensitive sui nomi tabella; richiede `EXP.TABLES=True`. |
+| `OPENROUTER.KEY` | **facoltativa nel `.ini`** | `""` | **Deve essere presente (non vuota) nel `dictConfig` finale se `EXP.PROMPT=True` o `EXP.PYTHON=True` o `EXP.JAVA=True`**: vale il valore `.ini` **oppure** il 2o parametro CLI (che si sovrappone). Se tutti e tre `False`, può mancare. |
+| `OPENROUTER.MODEL` | richiesta solo se `EXP.PROMPT/EXP.PYTHON/EXP.JAVA=True` | `""` | Es. `qwen/qwen-2.5-coder-32b-instruct`. Vedi nota privacy sotto. |
 
 Esempio minimo senza LLM (vale anche come schema di esempio: tutti gli `EXP.*`
 possono essere `False`; le `LIST` sono facoltative, oggetti separati da `","`):
@@ -75,10 +102,14 @@ EXP.CLASSES=False
 EXP.QUERIES=False
 EXP.MACROS=False
 EXP.REPORTS=False
+EXP.TABLES=False
+EXP.TABLES.LIST=Tabella1, Tabella2
 EXP.PROMPT=False
 EXP.PROMPT.LIST=Modulo1, Classe1
 EXP.PYTHON=False
 EXP.PYTHON.LIST=Modulo1, Classe1
+EXP.JAVA=False
+EXP.JAVA.LIST=Modulo1, Classe1
 ```
 
 Esempio con LLM e **chiave volutamente assente** (passata da CLI):
@@ -89,9 +120,11 @@ IN.ACCDB=NTJOBS_TEST.accdb
 OUT.PATH=ntjobs_test
 LOG=export.log
 EXP.FORMS=False
+EXP.TABLES=True
 EXP.PROMPT=True
 EXP.PROMPT.LIST=ntSys
-EXP.PYTHON=False
+EXP.PYTHON=True
+EXP.JAVA=True
 OPENROUTER.MODEL=qwen/qwen-2.5-coder-32b-instruct
 ; OPENROUTER.KEY omessa: verra passata come 2o parametro CLI
 ```
@@ -121,6 +154,38 @@ Launcher batch (già predisposto a inoltrare il 2o parametro):
 acc2oth.cmd ntjobs_test.ini sk-or-v1-TUA_CHIAVE
 acc2oth.cmd ntjobs_test.ini
 ```
+
+### Esempio concreto: ntjobs_test con Prompt, Python e Java
+
+Il file `ntjobs_test/ntjobs_test.ini` nella repo mostra una configurazione completa che attiva:
+
+- **Export tabelle** (`EXP.TABLES=True`) con filtro su `TabFormats` (`EXP.TABLES.LIST=TabFormats`)
+- **Generazione prompt markdown** (`EXP.PROMPT=True`) filtrato su `ntSys` (`EXP.PROMPT.LIST=ntSys`)
+- **Generazione Python** (`EXP.PYTHON=True`) 
+- **Generazione Java** (`EXP.JAVA=True`) con filtro su `NC_SysInfo, ntSys` (`EXP.JAVA.LIST=NC_SysInfo, ntSys`)
+
+La chiave OpenRouter **non è nel file .ini** (riga commentata `;OPENROUTER.KEY=`) e viene passata **come 2° parametro CLI**, evitando di committare il segreto:
+
+```powershell
+# Da radice del progetto:
+python -m acc2oth ntjobs_test/ntjobs_test.ini sk-or-v1-TUA_CHIAVE_OPENROUTER
+```
+
+oppure usando il launcher batch:
+
+```bat
+acc2oth.cmd ntjobs_test/ntjobs_test.ini sk-or-v1-TUA_CHIAVE_OPENROUTER
+```
+
+Cosa succede in sequenza:
+1. `app_export` — esporta Form/Moduli/Classi/Query/Macro/Report da `NTJOBS_TEST.accdb` in `ntjobs_test/`
+2. `app_tables` — esporta `TabFormats` in `ntjobs_test/tables/TabFormats.csv`
+3. `app_prompt` — genera `ntjobs_test/modules/prompt_ntSys.md` dal `ntSys.bas` esportato
+4. `app_python` — genera `ntjobs_test/modules/ntSys.py` dal `ntSys.bas`
+5. `app_java` — genera `ntjobs_test/modules/NC_SysInfo.java` e `ntjobs_test/modules/ntSys.java`
+6. `app_end` — aggiorna `ntjobs_test/index.json` con tutti i file generati
+
+La chiave API viene letta dal 2° parametro, sovrascrive quella del `.ini` (vuota), e non viene mai scritta nei log né in `index.json`.
 
 Regola di precedenza:
 
@@ -205,7 +270,7 @@ canonico; `EXP.QUERYES` (typo storico) resta solo come alias deprecato.
 Correzioni COM documentate: `SaveAsText` è metodo di `Application`
 (`app.SaveAsText`, non `DoCmd`), enumerazione `VBE.VBComponents` 1-based,
 deduplica del fallback `AllModules` (nomi unici per progetto). Novità di questa revisione: `OPENROUTER.KEY`
-facoltativa nel `.ini` + 2o parametro CLI in override (cfr. `prompt_acc2oth.md` cap. 3/6).
+facoltativa nel `.ini` + 2o parametro CLI in override.
 
 ---
 
@@ -229,13 +294,14 @@ app_args(file_ini, cli_key) -> app_verify -> app_export -> app_prompt -> app_pyt
   `OPENROUTER.*` in the final `dictConfig` when needed.
 - `app_export`: exports via COM (`SaveAsText`, `QueryDefs.SQL`, `VBE.Export`) in
   `FORMS > MODULES > CLASSES > QUERIES > MACROS > REPORTS` order.
-- `app_prompt` / `app_python`: scan existing `.bas`/`.cls` files on the filesystem
-  under `OUT.PATH/modules/` and `OUT.PATH/classes/` and generate `prompt_*.md` / `*.py`.
+- `app_tables`: exports tables to CSV (if `EXP.TABLES=True`).
+- `app_prompt` / `app_python` / `app_java`: scan existing `.bas`/`.cls` files on the filesystem
+  under `OUT.PATH/modules/` and `OUT.PATH/classes/` and generate `prompt_*.md` / `*.py` / `*.java` via OpenRouter.
 - `app_end`: writes `index.json` (merged with history).
 
 **Extracted (only when `EXP.*=True`):** Forms (`.txt`), Standard modules (`.bas`),
-Classes (`.cls`), Queries (`.sql`), Macros (`.txt`), Reports (`.txt`).
-**Tables are never exported**, only `Skipped table <name> (type: linked/local)` logs.
+Classes (`.cls`), Queries (`.sql`), Macros (`.txt`), Reports (`.txt`), Tables (`.csv`).
+**Tables are never exported by default**, only `Skipped table <name> (type: linked/local)` logs if `EXP.TABLES=False`.
 
 ## 2. Requirements
 
@@ -244,8 +310,31 @@ Classes (`.cls`), Queries (`.sql`), Macros (`.txt`), Reports (`.txt`).
   ```powershell
   pip install pywin32 requests
   ```
-- OpenRouter key (only when `EXP.PROMPT=True` or `EXP.PYTHON=True`), e.g.
-  `OPENROUTER.MODEL=qwen/qwen-2.5-coder-32b-instruct`.
+- Personal OpenRouter key (only when `EXP.PROMPT=True` or `EXP.PYTHON=True` or `EXP.JAVA=True`):
+  get one at `https://openrouter.ai/keys` and use it as `OPENROUTER.KEY` in the
+  `.ini` or as the 2nd CLI parameter (never commit real keys).
+  Example model: `OPENROUTER.MODEL=qwen/qwen-2.5-coder-32b-instruct`.
+
+## 2b. Configuring the `acc2oth.cmd` launcher
+
+Before first use, open `acc2oth.cmd` in a text editor and set the `PYN` variable
+to the path of **your own Python launcher** (the file ships with a sample
+`k:\Tools\pyn.cmd` that will almost certainly not match your PC):
+
+```bat
+REM SET PYTHON LAUNCHER (path to your own python/launcher)
+SET "PYN=C:\path\to\your\python.cmd"
+```
+
+Then test from the prompt:
+
+```bat
+acc2oth.cmd test_codfiscale.ini sk-or-v1-YOUR_PERSONAL_KEY
+```
+
+The 2nd parameter is **your personal OpenRouter key**: it overrides
+`OPENROUTER.KEY` from the `.ini` so you don't have to store the secret in the
+configuration file. Without active `EXP.PROMPT`/`EXP.PYTHON` no key is needed.
 
 ## 3. INI configuration file and `dictConfig`
 
@@ -258,11 +347,13 @@ The `.ini` file (`utf-8`, single `[CONFIG]` section) is **loaded at startup into
 | `IN.ACCDB` | yes | — | Path to `.accdb`/`.mdb` (relative to the `.ini` folder or absolute). Must exist. |
 | `OUT.PATH` | yes | — | Output folder; **created if missing** (recursive). Write-checked. |
 | `LOG` | no | `export.log` | Path **relative to `OUT.PATH`** (append mode). Absolute paths honored. |
-| `EXP.FORMS/MODULES/CLASSES/QUERIES/MACROS/REPORTS` | no | `False` | `True/False` (`1/0/yes/no/si/on/off` tolerated, case-insensitive). Canonical `EXP.QUERIES`; historic deprecated alias `EXP.QUERYES` tolerated (`QUERIES` wins + warning). Output folder always `queryes/`. |
+| `EXP.FORMS/MODULES/CLASSES/QUERIES/MACROS/REPORTS/TABLES` | no | `False` | `True/False` (`1/0/yes/no/si/on/off` tolerated, case-insensitive). Canonical `EXP.QUERIES`; historic deprecated alias `EXP.QUERYES` tolerated (`QUERIES` wins + warning). Output folder always `queryes/`. `EXP.TABLES` exports tables to `tables/*.csv`. |
 | `EXP.PROMPT` / `EXP.PROMPT.LIST` | no | `False` / empty | Generates `prompt_<name>.md` per `.bas`/`.cls`. `LIST` = case-insensitive CSV of stems; empty = all. |
 | `EXP.PYTHON` / `EXP.PYTHON.LIST` | no | `False` / empty | Generates `<name>.py` per `.bas`/`.cls`. Same filter. |
-| `OPENROUTER.KEY` | **optional in `.ini`** | `""` | **Must be present (non-empty) in the final `dictConfig` when `EXP.PROMPT=True` or `EXP.PYTHON=True`**: either from the `.ini` **or** the 2nd CLI parameter (which overrides). May be missing when both are `False`. |
-| `OPENROUTER.MODEL` | required only when `EXP.PROMPT/EXP.PYTHON=True` | `""` | E.g. `qwen/qwen-2.5-coder-32b-instruct`. See privacy note below. |
+| `EXP.JAVA` / `EXP.JAVA.LIST` | no | `False` / empty | Generates `<name>.java` per `.bas`/`.cls` (via OpenRouter). `LIST` = case-insensitive CSV of stems; requires `EXP.JAVA=True`. |
+| `EXP.TABLES` / `EXP.TABLES.LIST` | no | `False` / empty | Exports tables to `tables/*.csv`. `LIST` = case-insensitive CSV of table names; requires `EXP.TABLES=True`. |
+| `OPENROUTER.KEY` | **optional in `.ini`** | `""` | **Must be present (non-empty) in the final `dictConfig` when `EXP.PROMPT=True` or `EXP.PYTHON=True` or `EXP.JAVA=True`**: either from the `.ini` **or** the 2nd CLI parameter (which overrides). May be missing when all three are `False`. |
+| `OPENROUTER.MODEL` | required only when `EXP.PROMPT/EXP.PYTHON/EXP.JAVA=True` | `""` | E.g. `qwen/qwen-2.5-coder-32b-instruct`. See privacy note below. |
 
 Minimal example without LLM: same schema as the Italian section above.
 Example with the key intentionally missing from the `.ini` (passed via CLI): set
@@ -292,6 +383,38 @@ Batch launcher (already forwards the 2nd parameter):
 acc2oth.cmd ntjobs_test.ini sk-or-v1-YOUR_KEY
 ```
 
+### Concrete example: ntjobs_test with Prompt, Python and Java
+
+The file `ntjobs_test/ntjobs_test.ini` in the repo shows a complete configuration that enables:
+
+- **Table export** (`EXP.TABLES=True`) filtered on `TabFormats` (`EXP.TABLES.LIST=TabFormats`)
+- **Prompt markdown generation** (`EXP.PROMPT=True`) filtered on `ntSys` (`EXP.PROMPT.LIST=ntSys`)
+- **Python generation** (`EXP.PYTHON=True`)
+- **Java generation** (`EXP.JAVA=True`) filtered on `NC_SysInfo, ntSys` (`EXP.JAVA.LIST=NC_SysInfo, ntSys`)
+
+The OpenRouter key is **not in the .ini file** (line commented as `;OPENROUTER.KEY=`) and is passed **as the 2nd CLI parameter**, avoiding committing the secret:
+
+```powershell
+# From project root:
+python -m acc2oth ntjobs_test/ntjobs_test.ini sk-or-v1-YOUR_OPENROUTER_KEY
+```
+
+Or using the batch launcher:
+
+```bat
+acc2oth.cmd ntjobs_test/ntjobs_test.ini sk-or-v1-YOUR_OPENROUTER_KEY
+```
+
+What happens in sequence:
+1. `app_export` — exports Forms/Modules/Classes/Queries/Macros/Reports from `NTJOBS_TEST.accdb` to `ntjobs_test/`
+2. `app_tables` — exports `TabFormats` to `ntjobs_test/tables/TabFormats.csv`
+3. `app_prompt` — generates `ntjobs_test/modules/prompt_ntSys.md` from exported `ntSys.bas`
+4. `app_python` — generates `ntjobs_test/modules/ntSys.py` from `ntSys.bas`
+5. `app_java` — generates `ntjobs_test/modules/NC_SysInfo.java` and `ntjobs_test/modules/ntSys.java`
+6. `app_end` — updates `ntjobs_test/index.json` with all generated files
+
+The API key is read from the 2nd parameter, overrides the empty one in the `.ini`, and is never written to logs or `index.json`.
+
 Precedence:
 
 1. `dictConfig["OPENROUTER.KEY"]` = `.ini` value (may be empty/missing — optional there).
@@ -309,11 +432,12 @@ Exit codes: `0` success · `1` extraction/runtime error · `2` validation/config
   export.log
   index.json
   forms/*.txt
-  modules/*.bas  +  prompt_*.md (if EXP.PROMPT)  +  *.py (if EXP.PYTHON)
-  classes/*.cls  +  prompt_*.md                  +  *.py
+  modules/*.bas  +  prompt_*.md (if EXP.PROMPT)  +  *.py (if EXP.PYTHON)  +  *.java (if EXP.JAVA)
+  classes/*.cls  +  prompt_*.md                  +  *.py                  +  *.java
   queryes/*.sql
   macros/*.txt
   reports/*.txt
+  tables/*.csv
 ```
 
 - Exported files are always overwritten; `LOG` is appended; `index.json` is written
@@ -334,10 +458,15 @@ Exit codes: `0` success · `1` extraction/runtime error · `2` validation/config
 4. **VBA → Python transpiling.**
    `EXP.PYTHON=True` + `EXP.PYTHON.LIST=modInvoices,clsManager` converts only two
    modules; `.py` next to sources, token/cost diagnostics in the log.
-5. **Single-module filter.** `EXP.PROMPT.LIST=ntSys` generates only `prompt_ntSys.md`.
-6. **Multi-database batch.** One `.ini` per DB + PowerShell loop with a single key
+5. **VBA → Java transpiling.**
+   `EXP.JAVA=True` + `EXP.JAVA.LIST=modInvoices,clsManager` converts only two
+   modules; `.java` next to sources, token/cost diagnostics in the log.
+6. **Single-module filter.** `EXP.PROMPT.LIST=ntSys` generates only `prompt_ntSys.md`.
+7. **Table export to CSV.**
+   `EXP.TABLES=True` + `EXP.TABLES.LIST=Customers,Orders` exports only those tables to `tables/*.csv`.
+8. **Multi-database batch.** One `.ini` per DB + PowerShell loop with a single key
    from an environment variable (see Italian snippet above).
-7. **LLM cost diagnostics.** Each call logs `OpenRouter PROMPT/PYTHON start ...`
+9. **LLM cost diagnostics.** Each call logs `OpenRouter PROMPT/PYTHON/JAVA start ...`
    (model, src, chars) and `... done ... in Xm SSs | tokens prompt/completion/total | cost=$...`.
 
 ## 7. Common errors
@@ -351,6 +480,8 @@ Exit codes: `0` success · `1` extraction/runtime error · `2` validation/config
 - `Microsoft Access COM automation not available` → install Access + `pywin32`.
 - `Database locked/in use` → close Access / remove `.laccdb` lock.
 - `OUT.PATH not writable` → check permissions/network folder.
+- `EXP.TABLES.LIST specified but EXP.TABLES=False` → set `EXP.TABLES=True` in the `.ini`.
+- `EXP.JAVA.LIST specified but EXP.JAVA=False` → set `EXP.JAVA=True` in the `.ini`.
 
 ## 8. Security
 
@@ -367,5 +498,4 @@ No `export_mode/naming/overwrite/include_properties/manifest.json/logs/`; replac
 historic `EXP.QUERYES` (typo) remains only as a deprecated alias. Documented COM
 fixes: `SaveAsText` is an `Application` method (`app.SaveAsText`, not `DoCmd`),
 1-based `VBE.VBComponents` enumeration, `AllModules`-fallback dedup (unique names). New in this revision: optional
-`OPENROUTER.KEY` in the `.ini` + 2nd overriding CLI parameter (see
-`prompt_acc2oth.md` ch. 3/6).
+`OPENROUTER.KEY` in the `.ini` + 2nd overriding CLI parameter. New parameters: `EXP.TABLES`/`EXP.TABLES.LIST` (CSV export), `EXP.JAVA`/`EXP.JAVA.LIST` (Java transpiling via OpenRouter).
